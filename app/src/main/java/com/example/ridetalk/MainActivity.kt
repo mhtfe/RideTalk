@@ -37,6 +37,16 @@ class MainActivity : Activity() {
             text = "جابه‌جایی چپ/راست (من هدفون راست رو دارم)"
             setOnCheckedChangeListener { _, c -> Engine.swapped = c }
         })
+        root.addView(Switch(this).apply {
+            text = "گرفتن صدا از میکروفون هدفون (تغییرش نیاز به توقف و شروع دوباره داره)"
+            isChecked = true
+            setOnCheckedChangeListener { _, c -> Engine.useHeadsetMic = c }
+        })
+        root.addView(Switch(this).apply {
+            text = "قطع کامل موسیقی هنگام صحبت (خاموش = فقط کم شدن)"
+            isChecked = true
+            setOnCheckedChangeListener { _, c -> Engine.fullStop = c }
+        })
         root.addView(TextView(this).apply { text = "حساسیت تشخیص صحبت (چپ = حساس‌تر)"; setPadding(0, 32, 0, 0) })
         root.addView(SeekBar(this).apply {
             max = 60; progress = 20
@@ -71,6 +81,9 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             need += Manifest.permission.POST_NOTIFICATIONS
+        if (Build.VERSION.SDK_INT >= 31 &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            need += Manifest.permission.BLUETOOTH_CONNECT
         if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1) else launchService()
     }
 

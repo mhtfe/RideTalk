@@ -2,6 +2,7 @@ package com.example.ridetalk
 
 import android.content.Context
 import android.media.*
+import android.os.Build
 import kotlin.math.*
 
 /**
@@ -22,6 +23,8 @@ object Engine {
     @Volatile var sensitivity = 3.5f
     @Volatile var swapped = false     // false: من هدفون چپ رو دارم
     @Volatile var calibrating = 0     // 0 هیچ، 1 من، 2 دوست
+    @Volatile var useHeadsetMic = true   // میکروفون هدفون به جای گوشی
+    @Volatile var fullStop = true        // قطع کامل موسیقی هنگام صحبت
 
     private var thread: Thread? = null
     private val prof = arrayOfNulls<FloatArray>(2)
@@ -147,19 +150,35 @@ object Engine {
     private fun loop(ctx: Context) {
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        // ورودی: میکروفون داخلی گوشی
+        val headset = useHeadsetMic
+        if (headset) {
+            status = "در حال اتصال به میکروفون هدفون…"
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (Build.VERSION.SDK_INT >= 31) {
+                val d = am.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+                if (d == null) { am.mode = AudioManager.MODE_NORMAL; status = "هدفون بلوتوثی پیدا نشد"; return }
+                am.setCommunicationDevice(d)
+            } else {
+                am.startBluetoothSco(); am.isBluetoothScoOn = true
+            }
+            Thread.sleep(2000)
+        }
         val minRec = AudioRecord.getMinBufferSize(SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val rec = AudioRecord(MediaRecorder.AudioSource.MIC, SR, AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT, max(minRec, N * 4))
+        val rec = AudioRecord(
+            if (headset) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.MIC,
+            SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minRec, N * 4))
+        val wantType = if (headset) AudioDeviceInfo.TYPE_BLUETOOTH_SCO else AudioDeviceInfo.TYPE_BUILTIN_MIC
         am.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+            .firstOrNull { it.type == wantType }
             ?.let { rec.setPreferredDevice(it) }
+        val usage = if (headset) AudioAttributes.USAGE_VOICE_COMMUNICATION
+                    else AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
 
         // خروجی: استریو، مثل صدای مسیریاب (روی موسیقی میکس می‌شه)
         val minTrk = AudioTrack.getMinBufferSize(SR, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT)
         val track = AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                .setUsage(usage)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             .setAudioFormat(AudioFormat.Builder().setSampleRate(SR)
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -168,13 +187,15 @@ object Engine {
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
 
-        val focusReq = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-            .setAudioAttributes(AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+        fun mk(gain: Int) = AudioFocusRequest.Builder(gain)
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(usage)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             .setWillPauseWhenDucked(false)
             .setOnAudioFocusChangeListener { }
             .build()
+        val focusDuck = mk(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        val focusStop = mk(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        var focusReq = focusDuck
         var focus = false
 
         val buf = ShortArray(N)
@@ -211,7 +232,7 @@ object Engine {
 
                 if (warm < 25) { floor = (floor * warm + rms) / (warm + 1); warm++; track.write(zeros, 0, N * 2); continue }
 
-                val speech = rms > max(floor * sensitivity, 120f)
+                val speech = rms > max(floor * sensitivity * (if (headset && gL + gR > 0f) 1.6f else 1f), 120f)
                 if (speech) hang = HANG else if (hang > 0) hang--
                 val active = hang > 0
                 if (!active) floor = 0.98f * floor + 0.02f * rms
@@ -249,6 +270,7 @@ object Engine {
 
                 // ---- کم کردن موسیقی ----
                 if (active && !focus) {
+                    focusReq = if (fullStop) focusStop else focusDuck
                     focus = am.requestAudioFocus(focusReq) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
                 } else if (!active && focus) {
                     am.abandonAudioFocusRequest(focusReq); focus = false
@@ -265,6 +287,7 @@ object Engine {
                     }
                 } else status = "گوش می‌دم…"
 
+                if (headset && active) { tL = 1f; tR = 1f }
                 for (i in 0 until N) {
                     val t = (i + 1).toFloat() / N
                     val gl = gL + (tL - gL) * t
@@ -282,6 +305,11 @@ object Engine {
             rec.release()
             try { track.stop() } catch (_: Exception) {}
             track.release()
+            if (headset) {
+                if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice()
+                else { am.isBluetoothScoOn = false; am.stopBluetoothSco() }
+                am.mode = AudioManager.MODE_NORMAL
+            }
         }
     }
 }
